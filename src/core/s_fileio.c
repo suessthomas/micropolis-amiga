@@ -493,7 +493,7 @@ int LoadCity(char *filename)
 #ifdef MSDOS
     if (cp = (char *)rindex(filename, '\\'))
 #else
-    if (cp = (char *)rindex(filename, '/'))
+    if ((cp = (char *)rindex(filename, '/')) || (cp = (char *)rindex(filename, ':')))	/* Amiga port: also "DH0:name" */
 #endif
       cp++;
     else
@@ -586,14 +586,15 @@ SaveCityAs(char *filename)
 #ifdef MSDOS
     if (cp = (char *)rindex(filename, '\\'))
 #else
-    if (cp = (char *)rindex(filename, '/'))
+    if ((cp = (char *)rindex(filename, '/')) || (cp = (char *)rindex(filename, ':')))	/* Amiga port: also "DH0:name" */
 #endif
       cp++;
     else
       cp = filename;
     filename = (char *)ckalloc(strlen(cp) + 1);
     strcpy(filename, cp);
-    setCityName(cp);
+    setCityName(filename);	/* Amiga port: was setCityName(cp), a pointer into the caller's buffer, which the status line
+				   then showed as garbage ("? ???") after "Save City" */
     DidSaveCity();
   } else {
     sprintf(msg, "Unable to save the city to the file named \"%s\". %s",
