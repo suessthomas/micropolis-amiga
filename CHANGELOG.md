@@ -2,6 +2,17 @@
 
 Older versions: see the release notes on GitHub (v0.1 to v0.8.1).
 
+## Unreleased
+
+### Fixed
+- **The city name disappeared after *Save City*** (issue #6): the status line showed `? ???` or other garbage instead of the
+  name. `SaveCityAs()` in the original code kept a pointer into a buffer that was gone right after saving; it now keeps its
+  own copy, as loading always did. A city saved straight into a drive's root (`DH0:name.cty`) is now also named `name`.
+- **Moving the file requester left black areas** (issue #5): while *Load City* or *Save City* was open, the game picture
+  and the open windows behind it were not drawn again. The file requester now passes these messages on, and Micropolis
+  draws the uncovered parts at once. The same for the start menu and Micropolis's other questions (quit, scenario): they
+  now wait in a loop of their own that draws uncovered parts of the game at once.
+
 ## 0.8.19 (24 November 2026)
 
 Why a new release: two more faults of the original simulation are fixed (a loaded city was counted twice, traffic on busy

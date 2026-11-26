@@ -1450,9 +1450,24 @@ static struct Menu *make_menus(struct Screen *scr, APTR *vi_out)
 static int city_imported;                   /* the city came from an original SimCity file and has no .cty name yet */
 static char import_file[72];                /* the .cty name the save requester suggests for it */
 
+static void refresh_window_now(struct Window *w);
+
+/* asl message hook: while the file requester is open it shares the message port of the game window, and asl hands us
+ * every message that is not its own. Moving the requester uncovers parts of the game window and of the open panels:
+ * draw them at once (the main loop waits in AslRequest() meanwhile). Called with A0 = hook, A2 = requester, A1 = message. */
+static ULONG asl_msg(register struct Hook *h __asm("a0"), register APTR req __asm("a2"), register struct IntuiMessage *im __asm("a1"))
+{
+    if (im->Class == IDCMP_REFRESHWINDOW) {
+        refresh_window_now(im->IDCMPWindow);
+    }
+    return 0;
+}
+
 static int ask_file(struct Window *win, int save, char *out, size_t n)
 {
     int ok = 0;
+    static struct Hook msg_hook;
+    msg_hook.h_Entry = (ULONG (*)())asl_msg;
     if (!AslBase) return 0;
     if (save && city_imported && !CityFileName && CityName) snprintf(import_file, sizeof import_file, "%.60s.cty", CityName);
     else import_file[0] = 0;
@@ -1461,7 +1476,7 @@ static int ask_file(struct Window *win, int save, char *out, size_t n)
         ASLFR_Window, (ULONG)win, ASLFR_TitleText, (ULONG)(save ? T("Save City") : T("Load City")),
         ASLFR_InitialDrawer, (ULONG)"PROGDIR:cities", ASLFR_InitialPattern, (ULONG)(save ? "#?.cty" : "(#?.cty|~(#?.#?))"),
         import_file[0] ? ASLFR_InitialFile : TAG_IGNORE, (ULONG)import_file,
-        ASLFR_DoPatterns, TRUE, ASLFR_DoSaveMode, save, ASLFR_RejectIcons, TRUE, TAG_DONE);
+        ASLFR_DoPatterns, TRUE, ASLFR_DoSaveMode, save, ASLFR_RejectIcons, TRUE, ASLFR_IntuiMsgFunc, (ULONG)&msg_hook, TAG_DONE);
     if (fr) {
         if (AslRequest(fr, NULL)) {
             strncpy(out, (char *)fr->fr_Drawer, n - 1); out[n - 1] = 0;
@@ -1775,6 +1790,29 @@ static void repaint_now(struct Window *win)                /* draw the damaged p
     full_redraw = 1; first_present = 1; toolbar_dirty = status_dirty = demand_dirty = 1; last_line1[0] = 0;   /* and once more in full afterwards */
 }
 
+static void refresh_window_now(struct Window *w)           /* an uncovered game window or panel, while a requester waits */
+{
+    if (w == main_window_ptr) { repaint_now(w); return; }
+    for (int i = 0; i < NPANELS; i++) if (panels[i].win == w) { BeginRefresh(w); panel_render(i); EndRefresh(w, TRUE); return; }
+}
+
+static void refresh_pending(void)                          /* take only the refresh messages from the shared port; the rest stays for the main loop */
+{
+    struct Window *todo[1 + NPANELS]; int n = 0;
+    struct Node *nd, *nx;
+    if (!idcmp_port) return;
+    Forbid();
+    for (nd = idcmp_port->mp_MsgList.lh_Head; (nx = nd->ln_Succ); nd = nx) {
+        struct IntuiMessage *m = (struct IntuiMessage *)nd;
+        if (m->Class != IDCMP_REFRESHWINDOW) continue;
+        Remove(nd);
+        if (n < 1 + NPANELS) { int k; for (k = 0; k < n && todo[k] != m->IDCMPWindow; k++) ; if (k == n) todo[n++] = m->IDCMPWindow; }
+        ReplyMsg((struct Message *)m);
+    }
+    Permit();
+    for (int i = 0; i < n; i++) refresh_window_now(todo[i]);
+}
+
 static int easy(struct Window *win, const char *text, const char *gadgets)   /* 1..n for the buttons left to right, the last = 0 */
 {
     struct EasyStruct es;
@@ -1782,10 +1820,11 @@ static int easy(struct Window *win, const char *text, const char *gadgets)   /* 
     LONG r;
     es.es_StructSize = sizeof(struct EasyStruct); es.es_Flags = 0;
     es.es_Title = (CONST_STRPTR)"Micropolis"; es.es_TextFormat = (CONST_STRPTR)text; es.es_GadgetFormat = (CONST_STRPTR)gadgets;
-    if (!easy_centered || !win) return (int)EasyRequestArgs(win, &es, NULL, NULL);
-    rw = BuildEasyRequestArgs(win, &es, 0, NULL);             /* Intuition opens it at the top left; move it, then wait as EasyRequest does */
+    if (!win || !idcmp_port) return (int)EasyRequestArgs(win, &es, NULL, NULL);
+    rw = BuildEasyRequestArgs(win, &es, 0, NULL);             /* like EasyRequest, but we wait ourselves: the game windows are drawn again when the requester is moved */
     if ((ULONG)rw <= 1) return (int)(ULONG)rw;
-    {   struct Screen *s = rw->WScreen;
+    if (easy_centered) {                                       /* Intuition opens it at the top left: move it */
+        struct Screen *s = rw->WScreen;
         int x = (s->Width - rw->Width) / 2, y = win->TopEdge + BAR_H + 6;
         if (y + rw->Height > s->Height) y = s->Height - rw->Height;
         if (x < 0) x = 0;
@@ -1793,10 +1832,15 @@ static int easy(struct Window *win, const char *text, const char *gadgets)   /* 
         MoveWindow(rw, x - rw->LeftEdge, y - rw->TopEdge);
         for (int i = 0; i < 50 && (rw->LeftEdge != x || rw->TopEdge != y); i++) Delay(1);   /* Intuition moves it a moment later */
         {   char b[120]; sprintf(b, "requester %dx%d at %d,%d (screen %dx%d, status bar from y %d)", rw->Width, rw->Height, rw->LeftEdge, rw->TopEdge, s->Width, s->Height, win->TopEdge); logmsg(b); }
-        repaint_now(win); }                                    /* where the requester first opened */
-    while ((r = SysReqHandler(rw, NULL, TRUE)) == -2) ;
+        refresh_window_now(win); }                             /* where the requester first opened */
+    {   ULONG sigs = (1UL << rw->UserPort->mp_SigBit) | (1UL << idcmp_port->mp_SigBit);
+        while ((r = SysReqHandler(rw, NULL, FALSE)) == -2) {
+            refresh_pending();
+            Wait(sigs);
+        } }
     FreeSysRequest(rw);
-    repaint_now(win);                                          /* where it stood: the next requester (file, scenario) may open at once */
+    refresh_pending();
+    refresh_window_now(win);                                   /* where it stood: the next requester (file, scenario) may open at once */
     return (int)r;
 }
 
