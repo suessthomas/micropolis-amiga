@@ -17,7 +17,7 @@
 #include "notice_ui.h"
 
 #define MAX_NOTICES 64
-#define MAX_LINES 14
+#define MAX_LINES 15                          /* 15 x 14 px fit above the button */
 #define LINE_CHARS 50                         /* wrapped line width (8 px font, 440 px panel) */
 
 struct notice { int id; char *title; char *body; };
@@ -73,19 +73,22 @@ void notice_free(void)
 static void wrap(const char *s)
 {
     char word[64];
-    int col = 0, wl = 0;
+    int col = 0, wl = 0, full = 0;
     nlines = 0;
     lines[0][0] = 0;
-#define NEWLINE() do { if (nlines < MAX_LINES - 1) nlines++; lines[nlines][0] = 0; col = 0; } while (0)
+#define NEWLINE() do { if (nlines < MAX_LINES - 1) { nlines++; lines[nlines][0] = 0; col = 0; } else full = 1; } while (0)   /* no more room: the rest is left out (it used to overwrite the last line) */
     for (;; s++) {
         int end = (*s == 0), brk = (s[0] == '\\' && s[1] == 'n') || *s == '\n';
         if (*s == ' ' || end || brk) {
-            if (wl) {
+            if (wl && !full) {
                 word[wl] = 0;
                 if (col && col + 1 + wl > LINE_CHARS) NEWLINE();
-                if (col) { strcat(lines[nlines], " "); col++; }
-                strcat(lines[nlines], word); col += wl; wl = 0;
             }
+            if (wl && !full) {
+                if (col) { strcat(lines[nlines], " "); col++; }
+                strcat(lines[nlines], word); col += wl;
+            }
+            wl = 0;
             if (end) break;
             if (brk) { NEWLINE(); if (*s == '\\') s++; }
         } else if (wl < 60) {

@@ -256,6 +256,9 @@ Rio de Janeiro 2047
 S_0A6B8020
 Tempo
 ; Speed
+S_2810323F
+Schildkröte
+; Turtle
 S_353E0D45
 Optionen
 ; Options
@@ -392,7 +395,7 @@ S_2020BA3C
 Simulation und Grafik von Micropolis, dem quelloffenen SimCity (GPL v3, (c) Electronic Arts). Originalentwurf Will Wright, Unix-Version Don Hopkins.
 ; Simulation and graphics from Micropolis, the open-source SimCity (GPL v3, (c) Electronic Arts). Original design Will Wright, Unix version Don Hopkins.
 S_3B7368AE
-Übersetzungen: siehe die Kataloge im Ordner Catalogs.
+Übersetzungen: siehe Kataloge im Ordner Catalogs.
 ; Translations: see the catalogs in the Catalogs drawer.
 S_46493B89
 Über Micropolis

@@ -37,8 +37,12 @@
      im Auge.
   4. Öffnen Sie den Haushalt (Menü Fenster/Haushalt) für Steuern und Etats.
 
-  Tempo: Tasten 0 (Pause) bis 3 (schnell), das Menü Tempo oder die vier
-  kleinen Knöpfe unter den R-C-I-Balken (mit Zurück und Wiederholen).
+  Tempo: Tasten 0 (Pause), 1 (Schildkröte), 2 (langsam), 3 (mittel),
+  4 (schnell), das Menü Tempo oder die fünf kleinen Knöpfe unter den
+  R-C-I-Balken (mit Zurück und Wiederholen). Ein Spieljahr dauert als
+  Schildkröte 10 Minuten, langsam 120 s, mittel 60 s und schnell 20 s, auf
+  jedem Amiga, der schnell genug ist. Die Schildkröte ist für Ausstellungen
+  und Clubtreffen, bei denen die Stadt den ganzen Tag läuft.
   Bei Pause ist das Spiel still: die Umgebungsgeräusche blenden aus,
   Effekte werden nicht gespielt.
 @endnode
@@ -71,7 +75,7 @@
   Rechte Maustaste   Menüs
   W A S D, Mausrad, Maus am Bildschirmrand   scrollen
   M                  öffnet oder schließt die Übersichtskarte
-  0 1 2 3            Pause, langsam, mittel, schnell
+  0 1 2 3 4          Pause, Schildkröte, langsam, mittel, schnell (auch Amiga+0..4)
   b r p t x z        Werkzeugkürzel wie im Original (Planierraupe,
                      Straße, Park, Leitung, Schiene, Abfrage)
   Amiga+U / Amiga+Z  Rückgängig / Wiederholen der letzten Bauaktionen (bis 5)
@@ -103,7 +107,7 @@
                und Atari ST, Dateien ohne Endung; sie werden als neue
                .cty-Datei gespeichert)
   Szenarien    historische Städte mit Geschichte und Ziel
-  Tempo        Pause / langsam / mittel / schnell
+  Tempo        Pause / Schildkröte / langsam / mittel / schnell
   Optionen     Auto-Abriss, Auto-Haushalt, Katastrophen, Auto-Sprung,
                Animation Stadt, Animation Welt, Meldungen, Meldungsfenster, Tonoptionen (Fenster mit
                Schaltern, Lautstärkereglern und der Ausgabe: System oder AHI), Bildschirmmodus fragen

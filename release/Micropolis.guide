@@ -34,8 +34,11 @@
      (power plant plus wires) and roads. Keep an eye on the R C I bars.
   4. Open the budget (menu Windows/Budget) to set taxes and funding.
 
-  Speed: keys 0 (pause) to 3 (fast), the Speed menu, or the four small
-  buttons below the R C I bars (with undo and redo). At Pause the game is
+  Speed: keys 0 (pause), 1 (turtle), 2 (slow), 3 (medium), 4 (fast), the
+  Speed menu, or the five small buttons below the R C I bars (with undo and
+  redo). A game year takes 10 minutes as a turtle, 120 s slow, 60 s medium
+  and 20 s fast, the same on every Amiga that is fast enough. The turtle is
+  for exhibitions and club days where the city runs all day. At Pause the game is
   silent: the ambient sounds fade out and no effects play.
 @endnode
 
@@ -64,7 +67,7 @@
   Right mouse button  menus
   W A S D, mouse wheel, mouse at the screen edge   scroll
   M                   opens or closes the overview map
-  0 1 2 3             pause, slow, medium, fast
+  0 1 2 3 4           pause, turtle, slow, medium, fast (also Amiga+0..4)
   b r p t x z         tool shortcuts as in the original (bulldozer,
                       road, park, wire, rail, query)
   Amiga+U / Amiga+Z   undo / redo of the last building actions (up to 5)
@@ -92,7 +95,7 @@
              (Load also imports cities of the original SimCity for the Amiga
              and the Atari ST, files without an extension; they are saved as a
              new .cty file)
-  Speed      pause / slow / medium / fast
+  Speed      pause / turtle / slow / medium / fast
   Options    auto bulldoze, auto budget, disasters, auto goto, city animation,
              world animation, messages, message windows, sound options (window with the
              switches, volume sliders and the output: system or AHI), ask screen mode

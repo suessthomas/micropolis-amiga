@@ -35,8 +35,11 @@
      (elektrownia i linie) oraz drogami. Obserwuj paski R C I.
   4. Otworz budzet (menu Okna/Budzet), aby ustawic podatki i fundusze.
 
-  Tempo: klawisze 0 (pauza) do 3 (szybko), menu Tempo lub cztery male
-  przyciski pod paskami R C I (razem z cofnij i ponow). Przy pauzie gra
+  Tempo: klawisze 0 (pauza), 1 (zolw), 2 (wolno), 3 (srednio), 4 (szybko),
+  menu Tempo lub piec malych przyciskow pod paskami R C I (razem z cofnij
+  i ponow). Rok gry trwa jako zolw 10 minut, wolno 120 s, srednio 60 s,
+  szybko 20 s, na kazdej Amidze, ktora jest dosc szybka. Zolw jest na
+  wystawy i spotkania klubowe, gdzie miasto dziala caly dzien. Przy pauzie gra
   milczy: dzwieki otoczenia cichna, efekty nie graja.
 @endnode
 
@@ -68,7 +71,7 @@
   Prawy przycisk myszy   menu
   W A S D, kolko myszy, mysz przy krawedzi ekranu   przewijanie
   M                      otwiera lub zamyka mape przegladowa
-  0 1 2 3                pauza, wolno, srednio, szybko
+  0 1 2 3 4              pauza, zolw, wolno, srednio, szybko (tez Amiga+0..4)
   b r p t x z            skroty narzedzi jak w oryginale (spychacz,
                          droga, park, linia, tory, zapytanie)
   Amiga+U / Amiga+Z      cofnij / ponow ostatnie akcje budowy (do 5)
@@ -97,7 +100,7 @@
                i Atari ST, pliki bez rozszerzenia; zapisuje sie je jako nowy
                plik .cty)
   Scenariusze  historyczne miasta z opowiescia i celem
-  Tempo        pauza / wolno / srednio / szybko
+  Tempo        pauza / zolw / wolno / srednio / szybko
   Opcje        auto-burzenie, auto-budzet, katastrofy, auto-skok, animacja miasta, animacja swiata,
                komunikaty, okna komunikatow, opcje dzwieku (okno z
                przelacznikami, suwakami glosnosci i wyjsciem: system lub AHI), pytaj o tryb ekranu

@@ -75,7 +75,7 @@ question on again. `SIZE=` (ToolType or argument) skips the question and uses th
 | Build | click or drag on the map; the white frame shows what will be built |
 | Scroll | W A S D, mouse wheel, or move the mouse to the screen edge. With the overview map open: click or drag in it |
 | Menus | right mouse button: Project, Speed, Options, Windows, Map, Disasters |
-| Speed | `0` pause, `1` slow, `2` medium, `3` fast (or the Speed menu, or the four small buttons in the tool palette; the current speed is highlighted). At *Pause* the game is silent: the ambient sounds fade out and no effects play |
+| Speed | `0` pause, `1` turtle, `2` slow, `3` medium, `4` fast, also with the Amiga key (or the Speed menu, or the five small buttons in the tool palette; the current speed is highlighted). A game year takes 10 min / 120 s / 60 s / 20 s, the same on every Amiga that is fast enough (fixed clock from the timer.device); turtle is for exhibitions where the city runs all day. At *Pause* the game is silent: the ambient sounds fade out and no effects play |
 | Budget | Windows > Budget (taxes, road/fire/police funding; Continue / Cancel) |
 | Evaluation | Windows > Evaluation (public opinion, worst problems, score) |
 | Graphs | Windows > Graphs (residential, commercial, industrial, money, crime, pollution; 10 or 120 years) |
@@ -99,7 +99,7 @@ question on again. `SIZE=` (ToolType or argument) skips the question and uses th
 The bars below the tool icons show what the city needs: **R**esidential, **C**ommercial, **I**ndustrial
 (up from the white line = demand, down = too many). Events and warnings open a message window (Continue / Return / Space).
 
-You can load and save cities (`.cty`, the original Micropolis format; `cities/` has the classic scenarios). *Load City* also
+You can load and save cities (`.cty`, the original Micropolis format; `cities/` has the cities of the original Micropolis and `Jössnitz.cty`, a city by Thomas Süß made with this port). *Load City* also
 imports cities of the original SimCity for the Amiga and the Atari ST (files without a name extension, e.g. `San Francisco`
 from the SimCity disk): they are the same data in a MacBinary wrapper. An imported city is saved as a new `.cty` file; the original file is not
 overwritten.

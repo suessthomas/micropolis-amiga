@@ -30,6 +30,7 @@
 #include <intuition/screens.h>
 #include <cybergraphx/cybergraphics.h>
 #include <graphics/displayinfo.h>
+#include <graphics/gfxbase.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -42,6 +43,9 @@
 #include <proto/Picasso96.h>
 #include <proto/icon.h>
 #include <proto/keymap.h>
+#include <devices/timer.h>
+#define TimerBase mp_timer_base                   /* our own base for ReadEClock(); the C library has its own timer */
+#include <proto/timer.h>
 #include <libraries/amigaguide.h>
 #include <proto/amigaguide.h>
 #include <devices/inputevent.h>
@@ -199,6 +203,9 @@ static UBYTE palette[256 * 3];
 static int view_x, view_y;             /* top-left tile of the view */
 static char status_date[32] = "", status_funds[48] = "", status_msg[96] = "";
 extern int sim_loops;
+extern short Fcycle, Scycle;                    /* core: phase and cycle counters (for the DEBUG log) */
+int SimFrame(void);                            /* core (s_sim.c, w_sprite.c): the two halves of sim_loop() */
+int MoveObjects(void);
 static long clean_time;                    /* CityTime when the city was loaded, created or saved */
 static int tool_used;                      /* a building tool was used since then */
 static int menu_sync_pending;              /* set by UISetOptions / UISetGameLevel: the menu check marks must follow the game state */
@@ -236,6 +243,17 @@ static const int panning = 0;            /* (right button is the menu button now
 static int mouse_x = -1, mouse_y = -1;   /* last window position, for edge scrolling */
 static int edge_on, edge_n;               /* the mouse is at an edge: since when (edge_t0), loops counted */
 static struct timeval edge_t0;
+static int key_held, key_dx, key_dy, key_n;  /* a scroll key (cursor keys, W A S D) held down: its raw code and direction */
+static struct timeval key_t0, key_last;      /* when it went down, when it was last seen (key down or keyboard repeat) */
+
+/* both kinds of scrolling speed up alike: a short wait first, then a tile every 4th, every 2nd, every picture, 2 tiles */
+static int scroll_accel(long ms, int *n)       /* tiles to move in this picture */
+{
+    int every, step;
+    if (ms < 300) return 0;
+    every = ms < 900 ? 4 : ms < 1800 ? 2 : 1; step = ms >= 1800 ? 2 : 1;
+    return (++*n % every) ? 0 : step;
+}
 
 #define NTOOLS 18
 static UBYTE *toolicons2;              /* toolicons2.bin: uniform 32x32 set (colours from pen 48 up) */
@@ -409,7 +427,12 @@ static struct rect prev_cursor;
 static int have_prev_cursor;
 static char last_line1[200];
 
-static struct { long frames, tiles, bytes, render_us, sim_us, sim_steps, calls, bare, present_us, atlas; } stats;   /* calls: blits of the main picture; bare: changed cells that show only their tile; atlas: of those copied on the card */   /* no doubles: the ieee double library is unreliable */
+/* performance log (DEBUG), no doubles: the ieee double library is unreliable. calls: blits of the main picture; bare: changed
+ * cells that show only their tile; atlas: of those copied on the card; loops: passes of the main loop; no_wait: of those that
+ * went on without waiting for the vertical blank */
+static struct { long frames, tiles, bytes, render_us, sim_us, sim_steps, calls, bare, present_us, atlas, loops, no_wait; } stats;
+static struct timeval stats_t0;            /* start of the current perf period */
+static int dbg_vbl_always;                 /* test option vblwait: wait for the vertical blank after every pass of the main loop */
 
 static int anim_hold, anim_slow;                  /* the animation stands still while the view scrolls (anim_hold frames); anim_slow: a slow machine, half the speed */
 static int coast_tick, coast_seen;                /* animation step of the surf (145 ms each); shore tiles seen in the last picture */
@@ -441,12 +464,46 @@ static const UBYTE *sprite_frame(const SimSprite *s, int *w, int *h)
     return NULL;
 }
 
+/* Vehicles move on their own clock (OBJ_HZ steps per second, slower than the simulation clock) and are drawn between two
+ * steps: each picture shows them part of the way from the last position to the current one, so they glide smoothly
+ * although a step moves a train 4 and a plane 8 pixels. A jump (a new sprite, a turn at the map edge) is drawn as it is. */
+#define OBJ_HZ 20
+#define TILE_HZ 12                                    /* animated tiles (the traffic dots, smoke, water): own, calmer clock */
+#define MAX_GLIDE 24
+static struct glide { const SimSprite *s; short px, py, cx, cy; } glide[24];
+static int n_glide, glide_frac = 256;                 /* 0..256: how far the pictures are between the last and the current step */
+static void glide_before(void)                        /* positions before MoveObjects() */
+{
+    n_glide = 0;
+    for (SimSprite *sp = sim->sprite; sp && n_glide < 24; sp = sp->next) { glide[n_glide].s = sp; glide[n_glide].px = sp->x; glide[n_glide].py = sp->y; n_glide++; }
+}
+static void glide_after(void)                         /* and after it */
+{
+    for (int i = 0; i < n_glide; i++) { glide[i].cx = glide[i].s->x; glide[i].cy = glide[i].s->y; }
+}
+static void glide_pos(const SimSprite *s, int *x, int *y)
+{
+    *x = s->x; *y = s->y;
+    for (int i = 0; i < n_glide; i++) {
+        const struct glide *g = &glide[i];
+        int dx, dy;
+        if (g->s != s) continue;
+        if (g->cx != s->x || g->cy != s->y) return;   /* moved since (should not happen) */
+        dx = g->cx - g->px; dy = g->cy - g->py;
+        if (dx > MAX_GLIDE || dx < -MAX_GLIDE || dy > MAX_GLIDE || dy < -MAX_GLIDE) return;
+        *x = g->px + ((dx * glide_frac) >> 8); *y = g->py + ((dy * glide_frac) >> 8);
+        return;
+    }
+}
+
 static int sprite_rect(const SimSprite *s, struct rect *r, const UBYTE **px, int *w, int *h)
 {
     const UBYTE *p = sprite_frame(s, w, h);
+    int sx, sy;
     if (!p) return 0;
-    r->x0 = s->x - (view_x << 4) + s->x_offset + TB_W;
-    r->y0 = s->y - (view_y << 4) + s->y_offset + BAR_H;
+    glide_pos(s, &sx, &sy);
+    r->x0 = sx - (view_x << 4) + s->x_offset + TB_W;
+    r->y0 = sy - (view_y << 4) + s->y_offset + BAR_H;
     r->x1 = r->x0 + *w - 1;
     r->y1 = r->y0 + *h - 1;
     if (px) *px = p;
@@ -503,11 +560,11 @@ static int tool_h(int i)  { return (classic_icons || !toolicons2) ? (toolicons ?
 
 static int tool_hover = -1;            /* tool icon under the mouse (100 + n: one of the small buttons): its name and cost show in the label (a fixed-place tooltip) */
 
-/* six small buttons below the demand display: undo, redo and the four speeds (#49) */
-#define NBTN 6
-#define BTN_W 22
+/* seven small buttons below the demand display: undo, redo and the five speeds (#49; the turtle since 0.8.20) */
+#define NBTN 7
+#define BTN_W 19
 #define BTN_H 20
-#define BTN_X(i) (4 + (i) * 23)
+#define BTN_X(i) (2 + (i) * 20)
 static int dem_y(void);
 static int btn_y(void);
 static int btn_at(int mx, int my)
@@ -528,9 +585,14 @@ static int tool_at(int mx, int my)
     return -1;
 }
 
+struct Device *mp_timer_base;                      /* timer.device for ReadEClock() (the simulation clock) */
+static int turtle;                                 /* speed "turtle": the core runs at its slow speed (1), the clock here is 5x slower */
+static int speed_level(void) { return SimSpeed == 0 ? 0 : SimSpeed == 1 ? (turtle ? 1 : 2) : SimSpeed + 1; }
+static void set_level(int l) { turtle = l == 1; setSpeed(l == 0 ? 0 : l == 1 ? 1 : l - 1); }
+
 static void bpx(int x, int y, UBYTE pen) { if (x >= 0 && x < SCR_W && y >= 0 && y < SCR_H) fb[y * SCR_W + x] = pen; }
 
-/* the symbols are drawn pixel by pixel into the frame buffer (every screen depth): kind 0 undo, 1 redo, 2 pause, 3..5 play x1..x3 */
+/* the symbols are drawn pixel by pixel into the frame buffer (every screen depth): kind 0 undo, 1 redo, 2 pause, 3..5 play x1..x3, 6 turtle */
 static void btn_glyph(int kind, int x, int y, UBYTE pen)
 {
     if (kind < 2) {                                      /* hooked arrow with a pointed head: undo points left, redo right (drawn for undo, mirrored for redo) */
@@ -540,6 +602,10 @@ static void btn_glyph(int kind, int x, int y, UBYTE pen)
         for (int c = 5; c <= 16; c++) { UPX(c, 4); UPX(c, 5); }   /* the shaft, two pixels thick, centred on the head */
         for (int r = 6; r <= 11; r++) { UPX(15, r); UPX(16, r); } /* the tail going down at the far end */
         #undef UPX
+    } else if (kind == 6) {                              /* a turtle walking right */
+        static const char *const tt[7] = { "    #####      ", "  #########    ", " ########### ##", " ##############",
+                                           "############   ", "  ##     ##    ", "  ##     ##    " };
+        for (int r = 0; r < 7; r++) for (int c = 0; c < 15; c++) if (tt[r][c] == '#') bpx(x + 1 + c, y + 2 + r, pen);
     } else if (kind == 2) {                              /* two bars */
         for (int r = 0; r < 10; r++) for (int k = 0; k < 3; k++) { bpx(x + 4 + k, y + 1 + r, pen); bpx(x + 11 + k, y + 1 + r, pen); }
     } else {                                              /* one to three triangles pointing right */
@@ -558,9 +624,9 @@ static void draw_tool_buttons(void)
     int y = btn_y();
     if (y + BTN_H > SCR_H) return;
     for (int i = 0; i < NBTN; i++) {
-        UBYTE bg = (i >= 2 && SimSpeed == i - 2) ? PEN_SEL : PEN_BTN;
+        UBYTE bg = (i >= 2 && speed_level() == i - 2) ? PEN_SEL : PEN_BTN;
         for (int r = 0; r < BTN_H; r++) memset(fb + (y + r) * SCR_W + BTN_X(i), bg, BTN_W);
-        btn_glyph(i, BTN_X(i) + 2, y + 4, PEN_TEXT);
+        btn_glyph(i < 3 ? i : i == 3 ? 6 : i - 1, BTN_X(i) + 1, y + 4, PEN_TEXT);
     }
 }
 
@@ -784,7 +850,7 @@ static int blit_mode = BM_AUTO;
  * cell decides; the atlas is freed when wpa wins. */
 #define AUTO_FRAMES 100
 #define AUTO_CELLS 3000
-#define AUTO_MAX_CELLS 200
+#define AUTO_MAX_CELLS 600                  /* frames with more changed cells (scrolling, a full redraw) do not count; animated tiles alone can be 250 */
 static int auto_phase;
 static long auto_us[2], auto_cells[2], auto_frames[2];
 /* MERGE= tooltype: changed cells are sent as rectangles; a rectangle may include this many unchanged cells (16x16) to save a
@@ -1094,16 +1160,45 @@ static void draw_demand(void)
 /* Small scroll steps: move the picture inside the RTG screen (graphics.library blit, no bus traffic from the CPU)
  * and redraw only the newly exposed row/column of tiles. Only used while no panel and no overview map covers the
  * view, otherwise the whole view is redrawn (see render_frame). */
+static long scroll_us[4], scroll_n;
+static int dbg_scrollcheck;                         /* test option scrollcheck: after the scroll test, compare the screen with a full redraw */                 /* DEBUG scroll test: E clock time for blit, fb copy, whole picture; steps */
+static ULONG ec_now(void)                             /* E clock ticks (0 without timer.device), for DEBUG timings */
+{
+    struct EClockVal ev;
+    if (!mp_timer_base) return 0;
+    ReadEClock(&ev);
+    return ev.ev_lo;
+}
+static long ec_us(ULONG t0)                           /* microseconds since t0 */
+{
+    struct EClockVal ev; ULONG f;
+    if (!mp_timer_base) return 0;
+    f = ReadEClock(&ev);
+    return (long)((unsigned long long)(ev.ev_lo - t0) * 1000000ULL / f);
+}
+
 static void scroll_by(struct RastPort *rp, int dx, int dy)
 {
     static short old[MAX_ROWS][MAX_COLS];
     int sx = TB_W, sy = BAR_H, w = VIEW_COLS * 16, h = VIEW_ROWS * 16, tx = sx, ty = sy;
     if (dx > 0) { sx += dx * 16; w -= dx * 16; } else if (dx < 0) { tx -= dx * 16; w += dx * 16; }
     if (dy > 0) { sy += dy * 16; h -= dy * 16; } else if (dy < 0) { ty -= dy * 16; h += dy * 16; }
+    ULONG t0 = ec_now();
     ClipBlit(rp, sx, sy, rp, tx, ty, w, h, 0xC0);
+    scroll_us[0] += ec_us(t0); t0 = ec_now();
     /* fb moves along: it must match the screen everywhere, a merged rectangle also sends cells that did not change */
-    if (ty <= sy) for (int y = 0; y < h; y++) memmove(fb + (ty + y) * SCR_W + tx, fb + (sy + y) * SCR_W + sx, w);
-    else for (int y = h - 1; y >= 0; y--) memmove(fb + (ty + y) * SCR_W + tx, fb + (sy + y) * SCR_W + sx, w);
+    /* The frame buffer only has to follow when cells that did not change are sent too: MERGE > 0 joins them into the
+     * rectangles, and the test dump writes the whole picture. Otherwise only cells that render_frame draws again in full
+     * (tile, vehicles, cursor, chalk) go to the screen, so the copy is not needed - on a 68030 it took about half of every
+     * scroll step (377 KB at 800x600). */
+    if (merge_waste == 0 && !dbg_dump[0]) ;
+    /* All offsets and the width are multiples of 4 (TB_W, the screen width, 16-pixel cells), so the rows can go with
+     * CopyMemQuick (long words; SetPatch speeds it up with MOVE16 on a 68040/060). It copies upwards, so it is only used
+     * where that is safe: different rows, or the same row moved to the left; memmove otherwise. */
+    else if (dy == 0 && dx < 0) for (int y = 0; y < h; y++) memmove(fb + (ty + y) * SCR_W + tx, fb + (sy + y) * SCR_W + sx, w);
+    else if (ty <= sy) for (int y = 0; y < h; y++) CopyMemQuick(fb + (sy + y) * SCR_W + sx, fb + (ty + y) * SCR_W + tx, w);
+    else for (int y = h - 1; y >= 0; y--) CopyMemQuick(fb + (sy + y) * SCR_W + sx, fb + (ty + y) * SCR_W + tx, w);
+    scroll_us[1] += ec_us(t0); scroll_n++;
     if (planar) WaitBlit();                               /* the blitter must be done before the CPU writes bitplanes (WriteChunkyPixels) into the same memory */
     memcpy(old, shown, sizeof old);                       /* what each tile cell showed before */
     for (int r = 0; r < VIEW_ROWS; r++)
@@ -1343,13 +1438,25 @@ static void render_frame(struct Window *win)
                 blit_mode == BM_AUTO ? (auto_phase ? "auto(wpa)" : "auto(atlas)") : blit_name[blit_mode], merge_waste, stats.present_us / stats.frames, stats.calls / stats.frames,
                 stats.atlas / stats.frames, stats.bare / stats.frames, stats.bare * 256 / stats.frames, stats.bytes / stats.frames);
         logmsg(b);
+        {   /* main loop: passes and frames per second, and how often it went on without waiting for the vertical blank */
+            struct timeval t;
+            long ms;
+            gettimeofday(&t, NULL);
+            ms = (long)(t.tv_sec - stats_t0.tv_sec) * 1000L + (long)(t.tv_usec - stats_t0.tv_usec) / 1000L;
+            if (stats_t0.tv_sec && ms > 0) {
+                sprintf(b, "perf: %ld.%ld s: %ld frames/s, %ld loops/s, %ld of %ld loops without waiting for the vertical blank",
+                        ms / 1000, (ms % 1000) / 100, stats.frames * 1000 / ms, stats.loops * 1000 / ms, stats.no_wait, stats.loops);
+                logmsg(b);
+            }
+            stats_t0 = t;
+        }
         memset(&stats, 0, sizeof stats);
     }
 }
 
 /* ---------- menus and commands ---------- */
 enum { CMD_NEW = 1, CMD_LOAD, CMD_SAVE, CMD_SAVEAS, CMD_QUIT,
-       CMD_PAUSE = 10, CMD_SLOW, CMD_MEDIUM, CMD_FAST,
+       CMD_PAUSE = 10, CMD_SLOW, CMD_MEDIUM, CMD_FAST, CMD_TURTLE,
        CMD_AUTOBULLDOZE = 20, CMD_AUTOBUDGET, CMD_DISASTERS, CMD_SOUND, CMD_ASKMODE, CMD_AUTOGO, CMD_ANIM, CMD_MSGS, CMD_NOTICES, CMD_OVERLAY, CMD_LEVEL = 60, CMD_SPEAK = 65, CMD_STARTMENU = 66, CMD_CLASSIC = 67, CMD_LANG = 70, CMD_AMBIENT = 75, CMD_SOUNDWIN = 76, CMD_WORLDANIM = 77, CMD_UNDO = 79, CMD_REDO = 80,
        CMD_ABOUT = 44, CMD_HELP = 45, CMD_SCEN = 200, CMD_BUDGET = 40, CMD_MAP = 41, CMD_EVAL = 42, CMD_GRAPHS = 43, CMD_MAPMODE = 100,
        CMD_FIRE = 30, CMD_FLOOD, CMD_TORNADO, CMD_QUAKE, CMD_MONSTER, CMD_MELTDOWN };
@@ -1389,10 +1496,11 @@ static struct Menu *make_menus(struct Screen *scr, APTR *vi_out)
         for (int i = 0; i < 8; i++) mi(NM_ITEM, T(scen[i]), NULL, 0, CMD_SCEN + i + 1);
     }
     mi(NM_TITLE, T("Speed"), NULL, 0, 0);
-    mi_excl = 0xe; mi(NM_ITEM, T("Pause"), "0", CHECKIT | (SimSpeed == 0 ? CHECKED : 0), CMD_PAUSE);      /* the check mark shows the speed (#48) */
-    mi_excl = 0xd; mi(NM_ITEM, T("Slow"), "1", CHECKIT | (SimSpeed == 1 ? CHECKED : 0), CMD_SLOW);
-    mi_excl = 0xb; mi(NM_ITEM, T("Medium"), "2", CHECKIT | (SimSpeed == 2 ? CHECKED : 0), CMD_MEDIUM);
-    mi_excl = 0x7; mi(NM_ITEM, T("Fast"), "3", CHECKIT | (SimSpeed == 3 ? CHECKED : 0), CMD_FAST);
+    mi_excl = 0x1e; mi(NM_ITEM, T("Pause"), "0", CHECKIT | (speed_level() == 0 ? CHECKED : 0), CMD_PAUSE);      /* the check mark shows the speed (#48) */
+    mi_excl = 0x1d; mi(NM_ITEM, T("Turtle"), "1", CHECKIT | (speed_level() == 1 ? CHECKED : 0), CMD_TURTLE);
+    mi_excl = 0x1b; mi(NM_ITEM, T("Slow"), "2", CHECKIT | (speed_level() == 2 ? CHECKED : 0), CMD_SLOW);
+    mi_excl = 0x17; mi(NM_ITEM, T("Medium"), "3", CHECKIT | (speed_level() == 3 ? CHECKED : 0), CMD_MEDIUM);
+    mi_excl = 0x0f; mi(NM_ITEM, T("Fast"), "4", CHECKIT | (speed_level() == 4 ? CHECKED : 0), CMD_FAST);
     mi(NM_TITLE, T("Options"), NULL, 0, 0);
     mi(NM_ITEM, T("Auto Bulldoze"), NULL, CHECKIT | MENUTOGGLE | (autoBulldoze ? CHECKED : 0), CMD_AUTOBULLDOZE);
     mi(NM_ITEM, T("Auto Budget"), NULL, CHECKIT | MENUTOGGLE | (autoBudget ? CHECKED : 0), CMD_AUTOBUDGET);
@@ -1672,7 +1780,9 @@ static void menu_sync(void)                                  /* make the check m
             case CMD_WORLDANIM: want = world_anim; break;
             case CMD_MSGS: want = DoMessages; break;
             case CMD_NOTICES: want = DoNotices; break;
-            case CMD_PAUSE: case CMD_SLOW: case CMD_MEDIUM: case CMD_FAST: want = (SimSpeed == id - CMD_PAUSE); break;
+            case CMD_PAUSE: want = speed_level() == 0; break;
+            case CMD_TURTLE: want = speed_level() == 1; break;
+            case CMD_SLOW: case CMD_MEDIUM: case CMD_FAST: want = speed_level() == id - CMD_SLOW + 2; break;
             default:
                 if (id >= CMD_LEVEL && id < CMD_LEVEL + 3) want = (GameLevel == id - CMD_LEVEL);
             }
@@ -1739,10 +1849,11 @@ static int do_command(int id, struct Window *win, struct MenuItem *item)
         }
         break;
     case CMD_QUIT: return ask_quit(win) ? 0 : 1;
-    case CMD_PAUSE: setSpeed(0); break;
-    case CMD_SLOW: setSpeed(1); break;
-    case CMD_MEDIUM: setSpeed(2); break;
-    case CMD_FAST: setSpeed(3); break;
+    case CMD_PAUSE: set_level(0); break;
+    case CMD_TURTLE: set_level(1); break;
+    case CMD_SLOW: set_level(2); break;
+    case CMD_MEDIUM: set_level(3); break;
+    case CMD_FAST: set_level(4); break;
     case CMD_AUTOBULLDOZE: autoBulldoze = checked; break;
     case CMD_AUTOBUDGET: autoBudget = checked; break;
     case CMD_DISASTERS: NoDisasters = !checked; break;
@@ -2308,6 +2419,8 @@ static int real_main(int argc, char **argv)
     for (int di = 3; di < argc; di++) {                          /* debug options, any number, any order (arguments 3 and up) */
         const char *a = argv[di];
         if (!strncmp(a, "scroll=", 7)) { dbg_scroll = atoi(a + 7); setSpeed(0); }   /* debug: scroll test */
+        if (!strcmp(a, "vblwait")) dbg_vbl_always = 1;
+        if (!strcmp(a, "scrollcheck")) dbg_scrollcheck = 1;            /* debug: see dbg_scrollcheck */                 /* debug: wait for the vertical blank after every pass, as up to 0.8.19 */
         if (!strncmp(a, "jump=", 5)) { int jx = 0, jy = 0; sscanf(a + 5, "%d,%d", &jx, &jy); view_x = jx; view_y = jy; clamp_view(); setSpeed(0); }
         if (!strncmp(a, "sound=", 6)) sound_play(a + 6);               /* debug: play a sound at start */
         if (!strncmp(a, "scen=", 5)) { int n = atoi(a + 5); LoadScenario((short)n); recenter(); notice_show(n); }   /* debug: start a scenario */
@@ -2358,14 +2471,31 @@ static int real_main(int argc, char **argv)
         if (!strcmp(a, "show=sound")) open_info_panel(P_SOUND);
         if (!strcmp(a, "show=budget")) DoBudgetFromMenu();
         if (!strncmp(a, "at=", 3)) { int jx = 0, jy = 0; sscanf(a + 3, "%d,%d", &jx, &jy); view_x = jx; view_y = jy; clamp_view(); }   /* debug: scroll there, keep the speed */
-        if (!strncmp(a, "speed=", 6)) do_command(CMD_PAUSE + atoi(a + 6), win, NULL);   /* debug: as the Speed menu */
+        if (!strncmp(a, "speed=", 6)) set_level(atoi(a + 6));       /* debug: speed=0..4 as the keys (0 pause, 1 turtle ... 4 fast) */
         if (!strcmp(a, "show=map")) { open_info_panel(P_MAP); map_dirty = 1; }
         if (!strncmp(a, "notice=", 7)) { notice_show(atoi(a + 7)); notice_dirty = 1; }   /* debug */
     }
-    int running = 1, tick = 0, frame = 0, title_tick = 0;
+    int running = 1, frame = 0, title_tick = 0;
     sound_ui_ready = 1;
     after_load();                                      /* the city of the start: screen and window are open now */
-    static const int delay[4] = { 0, 12, 4, 1 };      /* video frames per simulation step */
+    /* Simulation clock (0.8.20): like the original, sim_loop() runs on a fixed 40 Hz clock, here from the E clock of the
+     * timer.device, independent of the display (50/60 Hz, graphics card) and of the CPU. Not every call computes a
+     * simulation step: per level the share below gives 1.28 / 6.4 / 12.8 / 38.4 steps per second after the core's own brake
+     * (every 5th call at "slow", every 3rd at "medium"), that is 10 min / 120 s / 60 s / 20 s per game year (768 steps).
+     * The other calls only move the vehicles (MoveObjects), so they move smoothly at every speed. A machine that cannot
+     * keep up runs as many calls per picture as fit into 60 ms of simulation time; the others wait for the next picture,
+     * so a single expensive step (the big scans) costs nothing. Only when more than 0.3 s are left over does it drop the
+     * rest: it then runs as fast as it can, and slow drawing (a slow graphics card) costs no simulation time. */
+    static const int sim_share[5] = { 0, 64, 320, 384, 384 };   /* per 400: calls with a simulation step, by speed level */
+    struct timerequest *ec_req = NULL; struct MsgPort *ec_port = CreateMsgPort(); ULONG ec_freq = 0, ec_acc = 0; int sim_acc = 0;
+    unsigned long long ec_last = 0, obj_t = 0; int obj_acc = 0, sim_due = 0, tiles_due = 0, tile_acc = 0;   /* sim_due: calls the clock asked for that have not run yet */
+    if (ec_port && (ec_req = (struct timerequest *)CreateIORequest(ec_port, sizeof(struct timerequest)))
+        && !OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_ECLOCK, (struct IORequest *)ec_req, 0)) {
+        struct EClockVal ev;
+        mp_timer_base = ec_req->tr_node.io_Device;
+        ec_freq = ReadEClock(&ev); ec_last = ((unsigned long long)ev.ev_hi << 32) | ev.ev_lo;
+        { char b[60]; sprintf(b, "clock: E clock %lu Hz, 40 Hz simulation clock", (unsigned long)ec_freq); logmsg(b); }
+    } else { if (ec_req) { DeleteIORequest((struct IORequest *)ec_req); ec_req = NULL; } logmsg("clock: no timer.device, one call per picture"); }
     while (running) {
         struct IntuiMessage *m;
         while ((m = (struct IntuiMessage *)GetMsg(idcmp_port))) {
@@ -2417,27 +2547,36 @@ static int real_main(int argc, char **argv)
                         }
                     }
                 }
+                if (up && (code & ~IECODE_UP_PREFIX) == key_held) key_held = 0;   /* the scroll key is up again */
                 if (up) continue;
+                {   int kdx = 0, kdy = 0;                           /* cursor keys and W A S D: one tile at once, then faster while held */
+                    switch (code) {
+                    case 0x4c: case 0x11: kdy = -1; break;
+                    case 0x4d: case 0x21: kdy = 1; break;
+                    case 0x4e: case 0x22: kdx = 1; break;
+                    case 0x4f: case 0x20: kdx = -1; break;
+                    }
+                    if (kdx || kdy) {
+                        struct timeval tn; gettimeofday(&tn, NULL);
+                        if (qual & IEQUALIFIER_REPEAT) { if (code == key_held) key_last = tn; continue; }   /* the system's key repeat: the main loop scrolls */
+                        view_x += kdx; view_y += kdy; clamp_view();
+                        key_held = code; key_dx = kdx; key_dy = kdy; key_t0 = key_last = tn; key_n = 0;
+                        continue;
+                    }
+                }
                 { static int n; if (n < 25) { char b[40]; sprintf(b, "rawkey 0x%02x", (unsigned)code); logmsg(b); n++; } }
                 switch (code) {
                 case 0x7a: view_y -= 2; break;                            /* mouse wheel */
                 case 0x7b: view_y += 2; break;
-                case 0x11: view_y--; break;                               /* W A S D scroll, too */
-                case 0x21: view_y++; break;
-                case 0x22: view_x++; break;
-                case 0x20: view_x--; break;
                 case 0x37: if (!(qual & (IEQUALIFIER_LCOMMAND | IEQUALIFIER_RCOMMAND))) { map_visible = !map_visible; map_dirty = 1; } break;   /* M */
                 case 0x5f: show_help(); break;                                       /* Help key */
                 case 0x45: if (pi >= 0) panels[pi].close(); else if (ask_quit(win)) running = 0; break;   /* Esc: closes the active panel window, else quits */
                 case 0x44: case 0x40: if (pi >= 0) panels[pi].close(); break;          /* Return, Space */
-                case 0x4c: view_y--; break;                               /* cursor keys scroll */
-                case 0x4d: view_y++; break;
-                case 0x4e: view_x++; break;
-                case 0x4f: view_x--; break;
-                case 0x0a: setSpeed(0); break;                           /* 0 = pause */
-                case 0x01: setSpeed(1); break;
-                case 0x02: setSpeed(2); break;
-                case 0x03: setSpeed(3); break;
+                case 0x0a: set_level(0); break;                          /* 0 pause, 1 turtle, 2 slow, 3 medium, 4 fast: */
+                case 0x01: set_level(1); break;                          /* the order of the Speed menu and the buttons */
+                case 0x02: set_level(2); break;                          /* (up to 0.8.19: 1 slow, 2 medium, 3 fast) */
+                case 0x03: set_level(3); break;
+                case 0x04: set_level(4); break;
                 }
                 clamp_view();
             } else if (pi >= 0) {
@@ -2474,7 +2613,7 @@ static int real_main(int argc, char **argv)
                     if (mx < TB_W && my >= BAR_H) {
                         int i = tool_at(mx, my);
                         if (i >= 100) {                               /* small buttons: undo, redo, speed */
-                            static const int cmd[NBTN] = { CMD_UNDO, CMD_REDO, CMD_PAUSE, CMD_SLOW, CMD_MEDIUM, CMD_FAST };
+                            static const int cmd[NBTN] = { CMD_UNDO, CMD_REDO, CMD_PAUSE, CMD_TURTLE, CMD_SLOW, CMD_MEDIUM, CMD_FAST };
                             if (i - 100 < NBTN) do_command(cmd[i - 100], win, NULL);
                             dirty = 1;
                         } else if (i >= 0) {
@@ -2500,7 +2639,8 @@ static int real_main(int argc, char **argv)
             dirty = 1;
         }
         frame++;
-        if (SimSpeed != menu_speed) { menu_speed = SimSpeed; menu_sync(); toolbar_dirty = 1; tb_label_only = 0; dirty = 1; }      /* keys, game events and the menu: the check mark follows the speed */
+        if (SimSpeed != 1) turtle = 0;                                    /* the core changed the speed (game event, loaded city) */
+        if (speed_level() != menu_speed) { menu_speed = speed_level(); menu_sync(); toolbar_dirty = 1; tb_label_only = 0; dirty = 1; }      /* keys, game events and the menu: the check mark follows the speed */
         if (dbg_hoverwalk) { int th = (frame % 36) / 2; if (th < NTOOLS && th != tool_hover) { tool_hover = th; if (!toolbar_dirty) tb_label_only = 1; toolbar_dirty = 1; dirty = 1; } }
         {   int ex = 0, ey = 0;                                           /* edge scrolling: which way does the mouse push? */
             int under = 0;                                    /* the pointer is really over the game window, not in the menu bar and not under a panel window (#42) */
@@ -2524,10 +2664,18 @@ static int real_main(int argc, char **argv)
                 if (!edge_on) { edge_on = 1; edge_t0 = tn; edge_n = 0; }
                 ms = (long)(tn.tv_sec - edge_t0.tv_sec) * 1000L + (long)(tn.tv_usec - edge_t0.tv_usec) / 1000L;
                 if (ms >= 300) {                                         /* a short dwell first: just passing over the edge does nothing; then faster the longer it stays (#42) */
-                    int every = ms < 900 ? 4 : ms < 1800 ? 2 : 1, step = ms >= 1800 ? 2 : 1;
-                    if (!(++edge_n % every)) { view_x += ex * step; view_y += ey * step; clamp_view(); dirty = 1; }
+                    int step = scroll_accel(ms, &edge_n);
+                    if (step) { view_x += ex * step; view_y += ey * step; clamp_view(); dirty = 1; }
                 }
             }
+        }
+        if (key_held) {                                                 /* a scroll key held down */
+            struct timeval tn; long ms, quiet;
+            gettimeofday(&tn, NULL);
+            ms = (long)(tn.tv_sec - key_t0.tv_sec) * 1000L + (long)(tn.tv_usec - key_t0.tv_usec) / 1000L;
+            quiet = (long)(tn.tv_sec - key_last.tv_sec) * 1000L + (long)(tn.tv_usec - key_last.tv_usec) / 1000L;
+            if (ms > 1500 && quiet > 1200) key_held = 0;                /* no key repeat for over a second: the key-up got lost (a requester, another window) */
+            else { int step = scroll_accel(ms, &key_n); if (step) { view_x += key_dx * step; view_y += key_dy * step; clamp_view(); dirty = 1; } }
         }
         sound_poll();
         if (anim_hold > 0) anim_hold--;
@@ -2552,25 +2700,73 @@ static int real_main(int argc, char **argv)
             if (!steps) gettimeofday(&ts, NULL);
             steps++; view_x++; if (dbg_scroll & 1) view_y++; dbg_scroll--; clamp_view(); dirty = 1;
             if (!dbg_scroll) {                                  /* debug: how long did the scroll test take? */
-                struct timeval te; char b[80]; gettimeofday(&te, NULL);
-                sprintf(b, "scroll test: %d steps in %ld ms (%d loops)", steps, (long)((te.tv_sec - ts.tv_sec) * 1000 + (te.tv_usec - ts.tv_usec) / 1000), frame);
+                struct timeval te; char b[200]; gettimeofday(&te, NULL);
+                sprintf(b, "scroll test: %d steps in %ld ms (%d loops); per step: picture %ld us, of that blit on the card %ld us, frame buffer copy %ld us", steps, (long)((te.tv_sec - ts.tv_sec) * 1000 + (te.tv_usec - ts.tv_usec) / 1000), frame,
+                        scroll_n ? scroll_us[2] / scroll_n : 0, scroll_n ? scroll_us[0] / scroll_n : 0, scroll_n ? scroll_us[1] / scroll_n : 0);
                 logmsg(b);
+                if (dbg_scrollcheck) dbg_scrollcheck = 2;          /* after this picture */
             }
         }
-        if (SimSpeed && ++tick >= delay[SimSpeed]) {
-            struct timeval t0, t1;
-            tick = 0;
-            gettimeofday(&t0, NULL);
-            sim_loop(1);
-            gettimeofday(&t1, NULL);
-            stats.sim_us += (long)(t1.tv_sec - t0.tv_sec) * 1000000L + (long)(t1.tv_usec - t0.tv_usec);
-            stats.sim_steps++;
-            dirty = 1;
+        {   int calls;
+            if (ec_freq) {
+                struct EClockVal ev; unsigned long long now; ULONG n;
+                ReadEClock(&ev); now = ((unsigned long long)ev.ev_hi << 32) | ev.ev_lo;
+                ec_acc += (ULONG)(now - ec_last) * 40UL; ec_last = now;   /* E clock ticks x 40: one call per ec_freq */
+                n = ec_acc / ec_freq; ec_acc -= n * ec_freq;
+                sim_due += (int)(n > 40 ? 40 : n);
+                if (sim_due > 12) sim_due = 12;                           /* more than 0.3 s behind: the CPU cannot keep up, drop the rest */
+            } else sim_due = 1;                                           /* without a timer.device: one call per picture */
+            if (!SimSpeed) { sim_due = 0; sim_acc = 0; }
+            calls = sim_due;
+            long pass_us = 0; int ran = 0;
+            for (int c = 0; c < calls; c++) {
+                struct timeval t0, t1; int step;
+                if (pass_us > 60000) break;                             /* 60 ms of simulation in this picture: the rest waits for the next one */
+                sim_due--;
+                sim_acc += sim_share[speed_level()];
+                step = sim_acc >= 400; if (step) sim_acc -= 400;
+                gettimeofday(&t0, NULL);
+                if (step) {
+                    SimFrame();                                     /* sim_loop() of the core, with the vehicles on their own clock */
+                    if (debug_log) {                                /* DEBUG: which steps take long (they stop the picture meanwhile) */
+                        struct timeval te; long us;
+                        gettimeofday(&te, NULL);
+                        us = (long)(te.tv_sec - t0.tv_sec) * 1000000L + (long)(te.tv_usec - t0.tv_usec);
+                        if (us > 80000) { char b[80]; sprintf(b, "long step: %ld ms, phase %d, cycle %d", us / 1000, (int)(Fcycle & 15), (int)Scycle); logmsg_t(b); }
+                    }
+                }
+                tile_acc += TILE_HZ;
+                if (tile_acc >= 40) { tile_acc -= 40; tiles_due = 1; }      /* the animated tiles step on their own clock */
+                obj_acc += OBJ_HZ;
+                if (obj_acc >= 40) {
+                    obj_acc -= 40;
+                    glide_before(); MoveObjects(); glide_after();
+                    if (ec_freq) { struct EClockVal ev; ReadEClock(&ev); obj_t = ((unsigned long long)ev.ev_hi << 32) | ev.ev_lo; }
+                }
+                sim_loops++;
+                sim_update();
+                ran = 1;
+                gettimeofday(&t1, NULL);
+                pass_us += (long)(t1.tv_sec - t0.tv_sec) * 1000000L + (long)(t1.tv_usec - t0.tv_usec);
+                stats.sim_us += (long)(t1.tv_sec - t0.tv_sec) * 1000000L + (long)(t1.tv_usec - t0.tv_usec);
+                stats.sim_steps++;
+                dirty = 1;
+            }
+            if (ran) { TilesAnimated = !tiles_due; tiles_due = 0; }      /* sim_update() asks for an animation step after every call: only on the vehicle clock */
+            if (ec_freq && SimSpeed && n_glide) {                       /* vehicles: part of the way to their current position */
+                struct EClockVal ev; unsigned long long now; int f;
+                ReadEClock(&ev); now = ((unsigned long long)ev.ev_hi << 32) | ev.ev_lo;
+                f = (int)(((now - obj_t) * OBJ_HZ * 256) / ec_freq);
+                if (f > 256) f = 256;
+                if (f != glide_frac) { glide_frac = f; dirty = 1; }
+            } else glide_frac = 256;
         }
         if (dirty) {
             static int first = 1; if (first) { logmsg("first frame"); first = 0; }
             if (!TilesAnimated) { if (DoAnimation) animateTiles(); TilesAnimated = 1; }
-            render_frame(win);
+            {   long n0 = scroll_n; ULONG t0 = ec_now();
+                render_frame(win);
+                if (scroll_n != n0) scroll_us[2] += ec_us(t0); }      /* DEBUG scroll test: the whole picture of a scroll step */
             dirty = 0;
         }
         if ((title_tick & 7) == 0) { static char last_clk[8]; char clk[8]; clock_hhmm(clk); if (strcmp(clk, last_clk)) { strcpy(last_clk, clk); dirty = 1; } }   /* the status line shows the time: redraw when the minute changes */
@@ -2578,7 +2774,8 @@ static int real_main(int argc, char **argv)
             char t[120];
             long pop = DoInitialEval && load_pop >= 0 ? load_pop : (long)CityPop;   /* just loaded: the evaluation is still to come */
             title_now = 0;
-            if (SimSpeed) sprintf(t, "Micropolis %s   %s   %s   %s %ld   %s %d", VERSION, status_date, status_funds, T("Pop"), pop, T("Speed"), (int)SimSpeed);
+            if (turtle && SimSpeed == 1) sprintf(t, "Micropolis %s   %s   %s   %s %ld   %s", VERSION, status_date, status_funds, T("Pop"), pop, T("Turtle"));
+            else if (SimSpeed) sprintf(t, "Micropolis %s   %s   %s   %s %ld   %s %d", VERSION, status_date, status_funds, T("Pop"), pop, T("Speed"), (int)SimSpeed);
             else sprintf(t, "Micropolis %s   %s   %s   %s %ld   %s", VERSION, status_date, status_funds, T("Pop"), pop, T("Pause"));   /* short: the depth gadget covers the end of the bar at 640 pixels */
             set_screen_title(t);
         }
@@ -2591,10 +2788,49 @@ static int real_main(int argc, char **argv)
         }
         if (dbg_quit_loops && title_tick > dbg_quit_loops) running = 0;
         if (dbg_load_loops && title_tick > dbg_load_loops) { dbg_load_loops = 0; logmsg_t("test: load"); load_city_file(dbg_load_path); }
-        WaitTOF();
+        if (dbg_scrollcheck == 2 && CyberGfxBase) {                       /* test: is the scrolled picture the same as a full redraw? */
+            int w = VIEW_COLS * 16, h = VIEW_ROWS * 16; long diff = 0, i;
+            UBYTE *a = AllocVec(w * h, MEMF_ANY), *b2 = AllocVec(w * h, MEMF_ANY);
+            dbg_scrollcheck = 0;
+            if (a && b2) {
+                char b[120];
+                WaitBlit();
+                ReadPixelArray(a, 0, 0, w, win->RPort, TB_W, BAR_H, w, h, RECTFMT_LUT8);
+                full_redraw = 1; render_frame(win); WaitBlit();
+                ReadPixelArray(b2, 0, 0, w, win->RPort, TB_W, BAR_H, w, h, RECTFMT_LUT8);
+                {   int x0 = w, y0 = h, x1 = -1, y1 = -1;
+                    for (i = 0; i < (long)w * h; i++) if (a[i] != b2[i]) {
+                        int x = (int)(i % w), y = (int)(i / w);
+                        diff++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+                    sprintf(b, "scroll check: %ld of %ld pixels differ from a full redraw (view x %d..%d, y %d..%d)", diff, (long)w * h, x0, x1, y0, y1); }
+                logmsg(b);
+            }
+            if (a) FreeVec(a);
+            if (b2) FreeVec(b2);
+        }
+        {   /* Wait for the next vertical blank only when this pass was quicker than one video frame. When the vertical blank
+             * has already gone by (a busy pass: render, blit and simulation together), WaitTOF would wait for the one after it
+             * and round every pass up to two frames (40 ms on PAL), so go on at once - but never twice in a row: a loop that
+             * never waits never gives the CPU away, and tasks of lower priority starve (on a 68030 every pass is longer than a
+             * frame; the game stopped writing its log in FS-UAE). Never more than one pass per frame. Since 0.8.20 the game
+             * speed comes from the timer.device, so this only gives more pictures per second, not a faster game. */
+            static struct timeval last_tof;
+            static long frame_us;
+            static int skipped;
+            struct timeval t;
+            long since;
+            if (!frame_us) frame_us = (GfxBase->DisplayFlags & PAL) ? 20000L : 16667L;
+            gettimeofday(&t, NULL);
+            since = (long)(t.tv_sec - last_tof.tv_sec) * 1000000L + (long)(t.tv_usec - last_tof.tv_usec);
+            stats.loops++;
+            if (dbg_vbl_always || skipped || (since >= 0 && since < frame_us)) { WaitTOF(); gettimeofday(&last_tof, NULL); skipped = 0; }
+            else { stats.no_wait++; last_tof = t; skipped = 1; }
+        }
         gettimeofday(&now_time, NULL);
         flagBlink = dbg_det ? -1 : (now_time.tv_usec < 500000) ? 1 : -1;
     }
+    if (ec_req) { CloseDevice((struct IORequest *)ec_req); DeleteIORequest((struct IORequest *)ec_req); }
+    if (ec_port) DeleteMsgPort(ec_port);
     if (dbg_dump[0]) {                                      /* test support: the exact picture (fb, panel scratch, palette), see tools/test */
         FILE *df = fopen(dbg_dump, "wb");
         if (df) {
