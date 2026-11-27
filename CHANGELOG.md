@@ -2,7 +2,11 @@
 
 Older versions: see the release notes on GitHub (v0.1 to v0.8.1).
 
-## Unreleased
+## 0.8.20 (27 November 2026)
+
+Why a new release: the game speed now comes from a fixed clock and is the same on every Amiga that is fast enough, with a
+new slowest speed "Turtle"; the simulation is about 1.5 times as fast on a 68030 (bit-identical results), there is no more
+halt every few seconds, scrolling is about twice as fast, and there is a new city, Jössnitz.
 
 ### Fixed
 - **The city name disappeared after *Save City*** (issue #6): the status line showed `? ???` or other garbage instead of the
@@ -12,6 +16,49 @@ Older versions: see the release notes on GitHub (v0.1 to v0.8.1).
   and the open windows behind it were not drawn again. The file requester now passes these messages on, and Micropolis
   draws the uncovered parts at once. The same for the start menu and Micropolis's other questions (quit, scenario): they
   now wait in a loop of their own that draws uncovered parts of the game at once.
+- **"About Micropolis" showed only "Catalogs." in its last line** (German): the text had one line more than the panel, and
+  the word wrap kept overwriting the last line. The panel holds 15 lines now, the German sentence is shorter, and a text
+  that is still too long is cut off instead of overwriting the last line.
+
+### Added
+- **A new city: Jössnitz** (`cities/Jössnitz.cty`, 1944), built by Thomas Süß with this port. It ships with the game and is
+  also part of the test runs. The release archive stores its name in ISO-8859-1, so the Amiga shows the umlaut.
+
+### Changed
+- **Fixed game speed from the timer.device, and a new slowest speed "Turtle".** Until now the speed depended on the
+  display (a simulation step every 12th / 4th / every picture at slow / medium / fast), so it differed between 50 Hz,
+  60 Hz and graphics cards, and slow was very slow (about 13 minutes per game year). Now, as in the original, a fixed
+  40 Hz clock from the E clock of the timer.device drives the simulation, independent of display and CPU. A game year
+  takes **20 s fast, 60 s medium, 120 s slow**, and **10 minutes as a turtle** (menu Speed, a fifth speed button with a turtle): for exhibitions and club days where a city runs all day. Trains, cars, planes, ships and the helicopter
+  move on a clock of their own, 20 steps per second at every speed (before: 5 to 60 depending on the speed), and are
+  drawn gliding between two steps, so they move calmly and smoothly. The animated tiles (the traffic on the roads,
+  smoke, water) step on a calmer clock of their own, 12 times per second. A machine that cannot keep up runs as fast as it can, without piling up: a 68030/25 MHz with a Picasso II
+  (WinUAE) reaches slow and medium and about 22 s per game year at fast; an A2000 with a 68060 and a ZZ9000 reaches all
+  speeds exactly (10.0 / 5.0 / 1.67 s per game month).
+- **No lost frame on busy passes**: the main loop waited for the next vertical blank after every pass. When a pass took
+  longer than one video frame, that vertical blank had already gone by and it waited for the one after, so every busy pass
+  took two frames. Now it waits only when the pass was quicker than a frame, but never twice in a row, so that other tasks
+  still get the CPU. Since the game speed now comes from the timer.device, this gives more pictures per second (emulated
+  68030 at 800x600: 10 instead of 9) without changing the speed of the city. Test option `vblwait`: wait after every pass as
+  before. With `DEBUG` the log shows frames and passes per second.
+- **The simulation is about 1.5 times as fast on a 68030:** the busiest parts of the original code (the traffic search of
+  every zone, the scan over the map with power and road updates, the power grid, pollution/land value and population
+  density) are rewritten for 32-bit 680x0 CPUs, with the same steps in the same order: the results are bit-identical to
+  before (hash runs: 24 cities, 6 seeds, 10 game years each). Emulated A3000 (68030, 25 MHz), 24 simulation steps: Kobe
+  8.1 -> 5.3 s, Haight 9.0 -> 6.2 s. More time is left for drawing, and "fast" comes closer to its 20 s per game year.
+- **No more halt every few seconds on slow machines:** the power grid scan, which runs about every 5 seconds, took up to
+  0.6 s on a 68030 for a big city, and the picture stood still meanwhile; now about 0.13 s, and no other single step takes
+  more than about 0.1 s. With `DEBUG` the log names simulation steps that take longer than 80 ms.
+- **Scrolling about twice as fast on slow machines:** every scroll step moved the whole picture in the copy of the screen
+  in fast RAM (377 KB at 800x600), which took about half of the step on a 68030. That copy is only needed with `MERGE` > 0
+  and is now left out otherwise. Emulated A3000 (68030, 25 MHz), one scroll step: 85 -> 45 ms at 800x600, 58 -> 33 ms at
+  640x480. Test options for developers: `scroll=N` logs the time per step, `scrollcheck` compares the scrolled picture
+  with a full redraw.
+- **Scrolling with the keys speeds up like scrolling at the screen edge:** holding a cursor key or W A S D moves the map
+  one tile at once, then after a short moment ever faster (a tile every 4th picture, every 2nd, every picture, then 2
+  tiles), exactly as when the mouse rests at the edge. Before, held keys scrolled at the steady pace of the key repeat.
+- **Speed keys in the order of the menu:** `0` pause, `1` turtle, `2` slow, `3` medium, `4` fast, with or without the
+  Amiga key (up to 0.8.19: `1` slow, `2` medium, `3` fast).
 
 ## 0.8.19 (24 November 2026)
 
