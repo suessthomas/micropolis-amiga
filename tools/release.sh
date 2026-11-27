@@ -20,8 +20,9 @@ cp COPYING "$D/Micropolis/COPYING"; cp release/Micropolis.guide "$D/Micropolis/M
 cp out/rtgtest "$D/Micropolis/Tools/RTGTest"; cp out/listmodes "$D/Micropolis/Tools/ListModes"
 cp -R "$SHARE"/res/. "$D/Micropolis/res/"
 cp upstream/cities/*.cty "$D/Micropolis/cities/"          # only the original cities, not what was saved in the test share
+cp release/cities/*.cty "$D/Micropolis/cities/"           # cities made for this port (Jössnitz by Thomas Süß); lha stores names in ISO-8859-1 for the Amiga
 cp -R "$SHARE"/Catalogs "$D/Micropolis/Catalogs"
 ARC="Micropolis-$VER.lha"
 docker run --rm -v "$PWD/$D":/stage -v "$PWD/$OUT":/out -w /stage sacredbanana/amiga-compiler:m68k-amigaos \
-    sh -c "rm -f /out/$ARC; lha a1o5 /out/$ARC Micropolis.info Micropolis >/dev/null 2>&1 && lha lv /out/$ARC | tail -45"
+    sh -c "rm -f /out/$ARC; lha a1o5 --system-kanji-code=utf8 --archive-kanji-code=latin1 /out/$ARC Micropolis.info Micropolis >/dev/null 2>&1 && lha lv /out/$ARC | tail -45"
 ls -la "$OUT/$ARC"
