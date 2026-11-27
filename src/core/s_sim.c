@@ -695,6 +695,98 @@ UpdateFundEffects(void)
 
 
 /* comefrom: Simulate DoSimInit */
+#ifndef NO_FAST_MAPSCAN
+/* Amiga port: the same scan as the original below, with the same steps in the same order and the same results, but the
+ * column of the map taken once per column instead of Map[x][y] for every access, and SetZPower() and DoRoad() written
+ * out here (they ran for every conducting field and every road field: the busiest calls of the simulation). */
+MapScan(int x1, int x2)
+{
+  static short DenTab[3] = { ROADBASE, LTRFBASE, HTRFBASE };
+  register short x, y;
+
+  for (x = x1; x < x2; x++)  {
+    register short *col = Map[x];
+    Byte *trf = TrfDensity[x >> 1];
+    for (y = 0; y < WORLD_Y; y++) {
+      if (CChr = col[y]) {
+	CChr9 = CChr & LOMASK;	/* Mask off status bits  */
+	if (CChr9 >= FLOOD) {
+	  SMapX = x;
+	  SMapY = y;
+	  if (CChr9 < ROADBASE) {
+	    if (CChr9 >= FIREBASE) {
+	      FirePop++;
+	      if (!(Rand16() & 3)) DoFire();	/* 1 in 4 times */
+	      continue;
+	    }
+	    if (CChr9 < RADTILE)  DoFlood();
+	    else DoRadTile();
+	    continue;
+	  }
+
+	  if (NewPower && (CChr & CONDBIT)) {	/* SetZPower() */
+	    QUAD PowerWrd;
+	    if ((CChr9 == NUCLEAR) || (CChr9 == POWERPLANT) ||
+		((PowerWrd = POWERWORD(x, y)), ((PowerWrd < PWRMAPSIZE) && (PowerMap[PowerWrd] & (1 << (x & 15))))))
+	      col[y] = CChr | PWRBIT;
+	    else
+	      col[y] = CChr & (~PWRBIT);
+	  }
+
+	  if ((CChr9 >= ROADBASE) &&
+	      (CChr9 < POWERBASE)) {	/* DoRoad() */
+	    short Density, tden, z;
+	    RoadTotal++;
+	    if (RoadEffect < 30) /* Deteriorating Roads */
+	      if (!(Rand16() & 511))
+		if (!(CChr & CONDBIT))
+		  if (RoadEffect < (Rand16() & 31)) {
+		    if (((CChr9 & 15) < 2) || ((CChr9 & 15) == 15))
+		      col[y] = RIVER;
+		    else
+		      col[y] = RUBBLE + (Rand16() & 3) + BULLBIT;
+		    continue;
+		  }
+	    if (!(CChr & BURNBIT)) { /* If Bridge */
+	      RoadTotal += 4;
+	      if (DoBridge()) continue;
+	    }
+	    if (CChr9 < LTRFBASE) tden = 0;
+	    else if (CChr9 < HTRFBASE) tden = 1;
+	    else {
+	      RoadTotal++;
+	      tden = 2;
+	    }
+	    Density = trf[y >> 1] >> 6;  /* Set Traf Density  */
+	    if (Density > 1) Density--;
+	    if (tden != Density) { /* tden 0..2   */
+	      z = ((CChr9 - ROADBASE) & 15) + DenTab[Density];
+	      z += CChr & (ALLBITS - ANIMBIT);
+	      if (Density) z += ANIMBIT;
+	      col[y] = z;
+	    }
+	    continue;
+	  }
+
+	  if (CChr & ZONEBIT) {	/* process Zones */
+	    DoZone();
+	    continue;
+	  }
+
+	  if ((CChr9 >= RAILBASE) &&
+	      (CChr9 < RESBASE)) {
+	    DoRail();
+	    continue;
+	  }
+	  if ((CChr9 >= SOMETINYEXP) &&
+	      (CChr9 <= LASTTINYEXP))  /* clear AniRubble */
+	    col[y] = RUBBLE + (Rand16() & 3) + BULLBIT;
+	}
+      }
+    }
+  }
+}
+#else
 MapScan(int x1, int x2)
 {
   register short x, y;
@@ -744,6 +836,9 @@ MapScan(int x1, int x2)
     }
   }
 }
+
+
+#endif
 
 
 /* comefrom: MapScan */

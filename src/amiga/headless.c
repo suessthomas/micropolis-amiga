@@ -73,6 +73,7 @@ static int real_main(int argc, char **argv)
         if (!LoadCity(argv[1])) { printf("LoadCity failed\n"); return 10; }
         SimSpeed = 3; SeedRand((int)hash_seed);
         {   int quiet = argc > 5 && !strcmp(argv[5], "quiet");    /* timing run: only the last state, so hashing does not count */
+            if (quiet) verbose = 0;                               /* nor the [UI] lines: each one costs about 0.2 s on an emulated 68030 */
             struct timeval t0, t1;
             if (!quiet) state_report(0);
             __real_gettimeofday(&t0, NULL);

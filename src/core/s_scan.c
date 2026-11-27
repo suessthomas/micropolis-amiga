@@ -73,6 +73,61 @@ short CrimeMaxX, CrimeMaxY;
 QUAD DonDither = 0;
 
 
+
+#ifndef NO_FAST_SCAN
+/* Amiga port: faster versions of the scans below, with the same steps in the same order and bit-identical results (the
+ * originals are kept, -DNO_FAST_SCAN). The half-size maps (tem, tem2, ...) are single blocks, column by column, so a
+ * field is base[x * HWLDY + y]; the inner loops index from a column pointer instead of going through the pointer table
+ * for every access, and the smoothing does the fields away from the edges without the four edge tests. */
+static void smooth_half(Byte *src, Byte *dst)	/* DoSmooth / DoSmooth2 without dithering: src -> dst */
+{
+  register int x, y, z;
+  for (x = 0; x < HWLDX; x++) {
+    register Byte *c = src + x * HWLDY, *o = dst + x * HWLDY;
+    Byte *l = c - HWLDY, *r = c + HWLDY;
+    if (x > 0 && x < HWLDX - 1) {
+      z = l[0] + r[0] + c[1];			/* y = 0 */
+      z = (z + c[0]) >> 2; if (z > 255) z = 255; o[0] = z;
+      for (y = 1; y < HWLDY - 1; y++) {
+	z = (l[y] + r[y] + c[y - 1] + c[y + 1] + c[y]) >> 2;
+	if (z > 255) z = 255;
+	o[y] = z;
+      }
+      z = l[y] + r[y] + c[y - 1];		/* y = HWLDY - 1 */
+      z = (z + c[y]) >> 2; if (z > 255) z = 255; o[y] = z;
+    } else {
+      for (y = 0; y < HWLDY; y++) {
+	z = 0;
+	if (x > 0) z += l[y];
+	if (x < (HWLDX - 1)) z += r[y];
+	if (y > 0) z += c[y - 1];
+	if (y < (HWLDY - 1)) z += c[y + 1];
+	z = (z + c[y]) >> 2;
+	if (z > 255) z = 255;
+	o[y] = z;
+      }
+    }
+  }
+}
+
+static int pvalue(int loc)			/* GetPValue() */
+{
+  if (loc < POWERBASE) {
+    if (loc >= HTRFBASE) return (75);
+    if (loc >= LTRFBASE) return (50);
+    if (loc <  ROADBASE) {
+      if (loc > FIREBASE) return (90);
+      if (loc >= RADTILE) return (255);
+    }
+    return (0);
+  }
+  if (loc <= LASTIND) return (0);
+  if (loc < PORTBASE) return (50);
+  if (loc <= LASTPOWERPLANT) return (100);
+  return (0);
+}
+#endif
+
 /* comefrom: Simulate SpecialInit */
 FireAnalysis(void)		/* Make firerate map from firestation map  */
 {
@@ -90,6 +145,60 @@ FireAnalysis(void)		/* Make firerate map from firestation map  */
 
 
 /* comefrom: Simulate SpecialInit */
+#ifndef NO_FAST_SCAN
+PopDenScan(void)		/*  sets: PopDensity, , , ComRate  */
+{
+  QUAD Xtot, Ytot, Ztot;
+  register short x, y, z;
+
+  ClrTemArray();
+  Xtot = 0;
+  Ytot = 0;
+  Ztot = 0;
+  for (x = 0; x < WORLD_X; x++) {
+    register short *col = Map[x];
+    Byte *tcol = tem[x >> 1];
+    for (y = 0; y < WORLD_Y; y++) {
+      z = col[y];
+      if (z & ZONEBIT) {
+	z = z & LOMASK;
+	SMapX = x;
+	SMapY = y;
+	z = GetPDen(z) <<3;
+	if (z > 254)
+	  z = 254;
+	tcol[y >> 1] = z;
+	Xtot += x;
+	Ytot += y;
+	Ztot++;
+      }
+    }
+  }
+  DoSmooth();			/* T1 -> T2 */
+  DoSmooth2();			/* T2 -> T1 */
+  DoSmooth();			/* T1 -> T2 */
+
+  {
+    register Byte *pd = PopDensity[0], *t2 = tem2[0];
+    register int i;
+    for (i = 0; i < HWLDX * HWLDY; i++)
+      pd[i] = t2[i] <<1;
+  }
+
+  DistIntMarket();		/* set ComRate w/ (/ComMap) */
+
+  if (Ztot) {			/* Find Center of Mass for City */
+    CCx = Xtot / Ztot;
+    CCy = Ytot / Ztot;
+  } else {
+    CCx = HWLDX;		/* if pop=0 center of Map is CC */
+    CCy = HWLDY;
+  }
+  CCx2 = CCx >>1;
+  CCy2 = CCy >>1;
+  NewMapFlags[DYMAP] = NewMapFlags[PDMAP] = NewMapFlags[RGMAP] = 1;
+}
+#else
 PopDenScan(void)		/*  sets: PopDensity, , , ComRate  */
 {
   QUAD Xtot, Ytot, Ztot;
@@ -136,6 +245,7 @@ PopDenScan(void)		/*  sets: PopDensity, , , ComRate  */
   CCy2 = CCy >>1;
   NewMapFlags[DYMAP] = NewMapFlags[PDMAP] = NewMapFlags[RGMAP] = 1;
 }
+#endif
 
 
 /* comefrom: PopDenScan */
@@ -164,6 +274,101 @@ GetPDen(int Ch9)
 
 
 /* comefrom: Simulate SpecialInit */
+#ifndef NO_FAST_SCAN
+PTLScan(void)   	/* Does pollution, terrain, land value   */
+{
+  QUAD ptot, LVtot;
+  register int x, y, z, dis;
+  int Plevel, LVflag, loc, pnum, LVnum, pmax, k;
+
+  {
+    register Byte *q = Qtem[0];
+    for (k = 0; k < QWX * QWY; k++)
+      q[k] = 0;
+  }
+  LVtot = 0;
+  LVnum = 0;
+  for (x = 0; x < HWLDX; x++) {
+    short *m0 = Map[x << 1], *m1 = Map[(x << 1) + 1];
+    Byte *tc = tem[x], *lv = LandValueMem[x], *pol = PollutionMem[x], *cr = CrimeMem[x];
+    Byte *tm = TerrainMem[x >> 1], *qt = Qtem[x >> 1];
+    int xdis = x > CCx2 ? x - CCx2 : CCx2 - x;
+    for (y = 0; y < HWLDY; y++) {
+      short *col;
+      int My, zy = y << 1;
+      Plevel = 0;
+      LVflag = 0;
+      for (col = m0; col; col = (col == m0) ? m1 : 0)	/* Mx = zx, zx + 1 */
+	for (My = zy; My <= zy + 1; My++) {
+	  if (loc = (col[My] & LOMASK)) {
+	    if (loc < RUBBLE) {
+	      qt[y >>1] += 15;	/* inc terrainMem */
+	      continue;
+	    }
+	    Plevel += pvalue(loc);
+	    if (loc >= ROADBASE)
+	      LVflag++;
+	  }
+	}
+      if (Plevel > 255)
+	Plevel = 255;
+      tc[y] = Plevel;
+      if (LVflag) {			/* LandValue Equation */
+	int ydis = y > CCy2 ? y - CCy2 : CCy2 - y, cc = xdis + ydis;	/* GetDisCC(x, y) */
+	if (cc > 32) cc = 32;
+	dis = 34 - cc;
+	dis = dis <<2;
+	dis += (tm[y >>1] );
+	dis -= (pol[y]);
+	if (cr[y] > 190) dis -= 20;
+	if (dis > 250) dis = 250;
+	if (dis < 1) dis = 1;
+	lv[y] = dis;
+	LVtot += dis;
+	LVnum++;
+      } else
+	lv[y] = 0;
+    }
+  }
+
+  if (LVnum)
+    LVAverage = LVtot / LVnum;
+  else
+    LVAverage = 0;
+
+  DoSmooth();
+  DoSmooth2();
+  pmax = 0;
+  pnum = 0;
+  ptot = 0;
+  for (x = 0; x < HWLDX; x++) {
+    Byte *tc = tem[x], *pol = PollutionMem[x];
+    for (y = 0; y < HWLDY; y++)  {
+      z = tc[y];
+      pol[y] = z;
+      if (z) {				/*  get pollute average  */
+	pnum++;
+	ptot += z;
+	/* find max pol for monster  */
+	if ((z > pmax) ||
+	    ((z == pmax) && (!(Rand16() & 3)))) {
+	  pmax = z;
+	  PolMaxX = x <<1;
+	  PolMaxY = y <<1;
+	}
+      }
+    }
+  }
+  if (pnum)
+    PolluteAverage = ptot / pnum;
+  else
+    PolluteAverage = 0;
+
+  SmoothTerrain();
+
+  NewMapFlags[DYMAP] = NewMapFlags[PLMAP] = NewMapFlags[LVMAP] = 1;
+}
+#else
 PTLScan(void)   	/* Does pollution, terrain, land value   */
 {
   QUAD ptot, LVtot;
@@ -251,6 +456,7 @@ PTLScan(void)   	/* Does pollution, terrain, land value   */
 
   NewMapFlags[DYMAP] = NewMapFlags[PLMAP] = NewMapFlags[LVMAP] = 1;
 }
+#endif
 
 
 /* comefrom: PTLScan */
@@ -406,6 +612,9 @@ DoSmooth (void)        /* smooths data in tem[x][y] into tem2[x][y]  */
       y += dir;
     }
   } else {
+#ifndef NO_FAST_SCAN
+    smooth_half(tem[0], tem2[0]);
+#else
     register short x,y,z;
 
     for (x = 0; x < HWLDX; x++) {
@@ -420,6 +629,7 @@ DoSmooth (void)        /* smooths data in tem[x][y] into tem2[x][y]  */
 	tem2[x][y] = (unsigned char)z;
       }
     }
+#endif
   }
 }
 
@@ -453,6 +663,9 @@ DoSmooth2 (void)        /* smooths data in tem2[x][y] into tem[x][y]  */
       y += dir;
     }
   } else {
+#ifndef NO_FAST_SCAN
+    smooth_half(tem2[0], tem[0]);
+#else
     register short x,y,z;
 
     for (x = 0; x < HWLDX; x++) {
@@ -467,6 +680,7 @@ DoSmooth2 (void)        /* smooths data in tem2[x][y] into tem[x][y]  */
 	tem[x][y] = (unsigned char)z;
       }
     }
+#endif
   }
 }
 

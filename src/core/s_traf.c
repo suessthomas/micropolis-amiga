@@ -61,6 +61,10 @@
  */
 #include "sim.h"
 
+#ifndef NO_FAST_TRAFFIC		/* Amiga port: -DNO_FAST_TRAFFIC builds the original TryDrive (to compare) */
+#define AMIGA_FAST_TRAFFIC
+#endif
+
 
 /* Traffic Generation */
 
@@ -202,6 +206,72 @@ FindPTele(void)		/* look for telecommunication on edges of zone */
 
 
 /* comefrom: MakeTraf */
+#ifdef AMIGA_FAST_TRAFFIC
+/* Amiga port: the same drive as the original below (TryDrive with TryGo, GetFromMap, RoadTest, MoveMapSim, PushPos and
+ * DriveDone), step by step in the same order, with the same random numbers and the same results, but in one function with
+ * the position in registers and the map indexed as the one block it is (field (x, y) is map[x * WORLD_Y + y]). This is the
+ * busiest part of the simulation: every zone sends traffic on a search of up to 30 steps. */
+#define ROADLIKE(t) ((t) >= ROADBASE && (t) <= LASTRAIL && !((t) >= POWERBASE && (t) < RAILHPOWERV))	/* RoadTest */
+TryDrive(void)
+{
+  static short TARGL[3] = {COMBASE, LHTHR, LHTHR};
+  static short TARGH[3] = {NUCLEAR, PORT, COMBASE};	/* for destinations */
+  register short *map = Map[0];
+  register int x = SMapX, y = SMapY, at, t;
+  int l = TARGL[Zsource], h = TARGH[Zsource];
+  int ldir = 5, z, d, rdir, realdir, moved, result = FALSE;
+
+  for (z = 0; z < MAXDIS; z++) {	/* Maximum distance to try */
+    rdir = Rand16() & 3;		/* TryGo(z) */
+    moved = 0;
+    at = x * WORLD_Y + y;
+    for (d = rdir; d < rdir + 4; d++) {	/* for the 4 directions */
+      realdir = d & 3;
+      if (realdir == ldir) continue;	/* skip last direction */
+      switch (realdir) {		/* GetFromMap(realdir), 0 off the map */
+      case 0: t = y > 0 ? map[at - 1] & LOMASK : 0; break;
+      case 1: t = x < WORLD_X - 1 ? map[at + WORLD_Y] & LOMASK : 0; break;
+      case 2: t = y < WORLD_Y - 1 ? map[at + 1] & LOMASK : 0; break;
+      default: t = x > 0 ? map[at - WORLD_Y] & LOMASK : 0; break;
+      }
+      if (ROADLIKE(t)) {
+	switch (realdir) {		/* MoveMapSim(realdir) */
+	case 0: y--; break;
+	case 1: x++; break;
+	case 2: y++; break;
+	default: x--; break;
+	}
+	ldir = (realdir + 2) & 3;
+	if (z & 1) {			/* save pos every other move: PushPos */
+	  PosStackN++;
+	  SMapXStack[PosStackN] = x;
+	  SMapYStack[PosStackN] = y;
+	}
+	moved = 1;
+	break;
+      }
+    }
+    if (moved) {			/* if it got a road */
+      at = x * WORLD_Y + y;		/* DriveDone: a destination next to it? */
+      if ((y > 0 && (t = map[at - 1] & LOMASK) >= l && t <= h) ||
+	  (x < WORLD_X - 1 && (t = map[at + WORLD_Y] & LOMASK) >= l && t <= h) ||
+	  (y < WORLD_Y - 1 && (t = map[at + 1] & LOMASK) >= l && t <= h) ||
+	  (x > 0 && (t = map[at - WORLD_Y] & LOMASK) >= l && t <= h)) {
+	result = TRUE;			/* pass */
+	break;
+      }
+    } else {
+      if (PosStackN) {			/* deadend , backup */
+	PosStackN--;
+	z += 3;
+      }
+      else break;			/* give up at start  */
+    }
+  }
+  SMapX = x; SMapY = y; LDir = ldir;
+  return (result);			/* gone maxdis */
+}
+#else
 TryDrive(void)
 {
   short z;
@@ -221,6 +291,9 @@ TryDrive(void)
   }
   return (FALSE);			/* gone maxdis */
 }
+
+
+#endif
 
 
 /* comefrom: TryDrive */

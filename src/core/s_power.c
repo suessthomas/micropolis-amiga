@@ -60,6 +60,11 @@
  * NOT APPLY TO YOU.
  */
 #include "sim.h"
+#include <string.h>
+
+#ifndef NO_FAST_POWERSCAN		/* Amiga port: -DNO_FAST_POWERSCAN builds the original DoPowerScan (to compare) */
+#define AMIGA_FAST_POWERSCAN
+#endif
 
 
 /* Power Scan */
@@ -183,6 +188,88 @@ short TestForCond(short TFDir)
 
 
 /* comefrom: Simulate SpecialInit InitSimMemory */
+#ifdef AMIGA_FAST_POWERSCAN
+/* Amiga port: the same flood fill as the original below, step by step in the same order with the same results, but
+ * without the function calls per neighbour (MoveMapSim + TestForCond moved the global SMapX/SMapY back and forth for every
+ * test). On a 68030 the original took about 0.6 s for a big city, and the picture stood still meanwhile. */
+static unsigned char pw_state[WORLD_X * WORLD_Y];	/* per field: 0 = does not conduct, 1 = conducts, no power yet, 2 = has power */
+
+static void pw_bits(void)			/* PowerMap from pw_state: the same bits SETPOWERBIT set for every field reached */
+{
+  register int x, y;
+  for (x = 0; x < WORLD_X; x++) {
+    register unsigned char *c = pw_state + x * WORLD_Y;
+    register int bit = 1 << (x & 15);
+    for (y = 0; y < WORLD_Y; y++)
+      if (c[y] == 2)
+	PowerMap[POWERWORD(x, y)] |= bit;
+  }
+}
+
+DoPowerScan()
+{
+  register unsigned char *st = pw_state;
+  register int x, y, at, i;
+  register QUAD num = 0, maxp;
+  short ADir;
+  int ConNum;
+  int cond_ok = (CChr9 != NUCLEAR) && (CChr9 != POWERPLANT);	/* TestForCond reads CChr9, which the scan never changes */
+
+  for (i = 0; i < PWRMAPSIZE; i++)
+    PowerMap[i] = 0;	/* ClearPowerMem */
+  if (cond_ok) {				/* conducting fields; when CChr9 is a power plant TestForCond is never true */
+    register short *map = Map[0];		/* the map is one block, column by column: field (x, y) is map[x * WORLD_Y + y] */
+    for (i = 0; i < WORLD_X * WORLD_Y; i++)
+      st[i] = (map[i] & CONDBIT) ? 1 : 0;
+  } else
+    memset(st, 0, sizeof pw_state);
+
+  MaxPower = maxp = (CoalPop * 700L) + (NuclearPop * 2000L); /* post release */
+  NumPower = 0;
+
+  x = SMapX; y = SMapY; at = x * WORLD_Y + y;
+  while (PowerStackNum)	{
+    if (PowerStackNum > 0) {		/* PullPowerStack */
+      x = PowerStackX[PowerStackNum];
+      y = PowerStackY[PowerStackNum];
+      PowerStackNum--;
+      at = x * WORLD_Y + y;
+    }
+    ADir = 4;
+    do {
+      if (++num > maxp) {
+	NumPower = num;
+	pw_bits();
+	SMapX = x; SMapY = y;
+	SendMes(40);
+	return;
+      }
+      switch (ADir) {			/* MoveMapSim(ADir): a direction that TestForCond found open */
+      case 0: if (y > 0) { y--; at--; } else if (y < 0) y = 0; break;
+      case 1: if (x < WORLD_X - 1) { x++; at += WORLD_Y; } else if (x > WORLD_X - 1) x = WORLD_X - 1; break;
+      case 2: if (y < WORLD_Y - 1) { y++; at++; } else if (y > WORLD_Y - 1) y = WORLD_Y - 1; break;
+      case 3: if (x > 0) { x--; at -= WORLD_Y; } else if (x < 0) x = 0; break;
+      }
+      st[at] = 2;			/* SETPOWERBIT */
+      ConNum = 0;			/* TestForCond(Dir) for Dir 0..3 until two are open: conducting and no power yet */
+      if (y > 0 && st[at - 1] == 1) { ConNum++; ADir = 0; }
+      if (x < WORLD_X - 1 && st[at + WORLD_Y] == 1) { ConNum++; ADir = 1; }
+      if (ConNum < 2 && y < WORLD_Y - 1 && st[at + 1] == 1) { ConNum++; ADir = 2; }
+      if (ConNum < 2 && x > 0 && st[at - WORLD_Y] == 1) { ConNum++; ADir = 3; }
+      if (ConNum > 1) {			/* PushPowerStack */
+	if (PowerStackNum < (PWRSTKSIZE - 2)) {
+	  PowerStackNum++;
+	  PowerStackX[PowerStackNum] = x;
+	  PowerStackY[PowerStackNum] = y;
+	}
+      }
+    } while (ConNum);
+  }
+  NumPower = num;
+  pw_bits();
+  SMapX = x; SMapY = y;
+}
+#else
 DoPowerScan()
 {	
   short ADir;
@@ -227,6 +314,9 @@ DoPowerScan()
     } while (ConNum);
   }
 }
+
+
+#endif
 
 
 /* comefrom: DoPowerScan DoSPZone */
